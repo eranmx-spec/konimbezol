@@ -1,0 +1,543 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import * as Icons from "lucide-react";
+import { BUDGETS, CATEGORIES, INTERESTS, MODULE_STATS, PRODUCTS, RECIPIENTS, img } from "./data";
+import type { CatId, Product } from "./data";
+
+type View =
+  | { v: "home" } | { v: "cat"; id: CatId } | { v: "product"; id: string; from: string }
+  | { v: "scan" } | { v: "gift" } | { v: "search"; q: string } | { v: "admin" };
+
+const Ic = ({ name, size = 22 }: { name: string; size?: number }) => {
+  const C = (Icons as any)[name] || Icons.Package;
+  return <C size={size} aria-hidden="true" />;
+};
+const ils = (n: number) => `${n.toLocaleString("he-IL")} ₪`;
+const saveStore = (p: Product) => Math.round((1 - p.price / p.store) * 100);
+const byId = (id: string) => PRODUCTS.find((p) => p.id === id)!;
+// the admin demo stays out of the public build
+const PAGES = import.meta.env.DEV ? ["scan", "gift", "admin"] : ["scan", "gift"];
+const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("a11y-noanim");
+const aliUrl = (p: Product) => `https://he.aliexpress.com/item/${p.ali}.html`;
+
+// consent-gated analytics: GoatCounter is cookieless and only loads after the visitor agrees
+const GOATCOUNTER = ""; // e.g. "konim-hacham" once the account exists
+const CONSENT_KEY = "konim-consent-v1";
+type Consent = { analytics: boolean; at: string };
+function readConsent(): Consent | null {
+  try { return JSON.parse(localStorage.getItem(CONSENT_KEY) || "null"); } catch { return null; }
+}
+function loadAnalytics() {
+  if (!GOATCOUNTER || document.getElementById("gc-script")) return;
+  const s = document.createElement("script");
+  s.id = "gc-script"; s.async = true; s.src = "https://gc.zgo.at/count.js";
+  s.dataset.goatcounter = `https://${GOATCOUNTER}.goatcounter.com/count`;
+  document.body.appendChild(s);
+}
+
+function fromHash(): View {
+  const h = location.hash.replace("#", "");
+  if (PAGES.includes(h)) return { v: h } as View;
+  const cat = CATEGORIES.find((c) => c.id === h);
+  if (cat) return { v: "cat", id: cat.id };
+  return { v: "home" };
+}
+
+// fade-up elements marked .rv as they scroll into view
+function useReveal(dep: unknown) {
+  useEffect(() => {
+    const els = document.querySelectorAll<HTMLElement>(".rv:not(.in)");
+    if (!("IntersectionObserver" in window)) { els.forEach((e) => e.classList.add("in")); return; }
+    const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { rootMargin: "0px 0px -8% 0px" });
+    els.forEach((e) => io.observe(e));
+    return () => io.disconnect();
+  }, [dep]);
+}
+
+function CountUp({ to, suffix = "" }: { to: number; suffix?: string }) {
+  const [n, setN] = useState(0);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce || !("IntersectionObserver" in window)) { setN(to); return; }
+    let raf = 0;
+    const io = new IntersectionObserver(([e]) => {
+      if (!e.isIntersecting) return; io.disconnect();
+      const t0 = performance.now();
+      const tick = (t: number) => { const k = Math.min(1, (t - t0) / 1400); setN(Math.round(to * (1 - Math.pow(1 - k, 3)))); if (k < 1) raf = requestAnimationFrame(tick); };
+      raf = requestAnimationFrame(tick);
+    });
+    io.observe(el);
+    return () => { io.disconnect(); cancelAnimationFrame(raf); };
+  }, [to]);
+  return <span ref={ref} className="num">{n.toLocaleString("he-IL")}{suffix}</span>;
+}
+
+export default function App() {
+  const [view, setView] = useState<View>(() => { try { return fromHash(); } catch { return { v: "home" }; } });
+  const [q, setQ] = useState("");
+  const [toast, setToast] = useState("");
+  const [products, setProducts] = useState<Product[]>(PRODUCTS);
+  const key = JSON.stringify(view);
+  useReveal(key);
+
+  const go = (next: View) => {
+    setView(next);
+    window.scrollTo({ top: 0 });
+    try {
+      const token = next.v === "cat" ? next.id : PAGES.includes(next.v) ? next.v : "";
+      history.replaceState(null, "", token ? `#${token}` : location.pathname);
+    } catch { /* hash not available */ }
+  };
+  const open = (p: Product, from: string) => go({ v: "product", id: p.id, from });
+  const buy = (p: Product, _from: string) => { window.open(aliUrl(p), "_blank", "noopener,noreferrer"); };
+  const [consentOpen, setConsentOpen] = useState(() => readConsent() === null);
+  useEffect(() => { if (readConsent()?.analytics) loadAnalytics(); }, []);
+  const decide = (analytics: boolean) => {
+    try { localStorage.setItem(CONSENT_KEY, JSON.stringify({ analytics, at: new Date().toISOString() })); } catch { /* storage blocked */ }
+    if (analytics) loadAnalytics();
+    setConsentOpen(false);
+  };
+  useEffect(() => { document.documentElement.lang = "he"; document.documentElement.dir = "rtl"; }, []);
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(""), 3800); return () => clearTimeout(t); }, [toast]);
+
+  const ticker = ["p5", "p9", "p1", "p6", "p3", "p16", "p12", "p10"].map(byId);
+
+  return (
+    <>
+      <a href="#main" className="sr-only focus:not-sr-only">דילוג לתוכן</a>
+      <section className="ticker" aria-label="מבצעים חמים">
+        <div className="ticker-track">
+          {[0, 1].map((k) => (
+            <span key={k} className="ticker-set" aria-hidden={k === 1}>
+              {ticker.map((p) => <span key={p.id} className="tick num"><i />{p.title.split(" ").slice(0, 3).join(" ")} · <s>{ils(p.store)} בחנות</s> <b>{ils(p.price)}</b></span>)}
+            </span>
+          ))}
+        </div>
+      </section>
+      <header className="mast">
+        <div className="wrap mast-row">
+          <button className="logo" onClick={() => go({ v: "home" })} aria-label="קונים חכם, לעמוד הראשי">
+            <span className="logo-mark"><Ic name="ScanLine" size={20} /></span>
+            <span><span className="logo-name">קונים חכם</span><span className="logo-sub">ראיתם בחנות. קניתם בחכמה.</span></span>
+          </button>
+          <nav className="nav" aria-label="ניווט ראשי">
+            <button aria-current={view.v === "scan" ? "page" : undefined} onClick={() => go({ v: "scan" })} className="nav-cta"><Ic name="Camera" size={16} />צלם ומצא</button>
+            <button aria-current={view.v === "cat" ? "page" : undefined} onClick={() => go({ v: "cat", id: "gadgets" })}>קטגוריות</button>
+            <button aria-current={view.v === "gift" ? "page" : undefined} onClick={() => go({ v: "gift" })}>מוצא מתנות</button>
+          </nav>
+          <form className="search" role="search" onSubmit={(e) => { e.preventDefault(); if (q.trim()) go({ v: "search", q: q.trim() }); }}>
+            <Ic name="Search" size={17} />
+            <label htmlFor="q" className="sr-only">חיפוש מוצר</label>
+            <input id="q" value={q} onChange={(e) => setQ(e.target.value)} placeholder="חיפוש: מצלמת דרך, מברגה..." />
+          </form>
+        </div>
+      </header>
+
+      <main id="main" key={key} className="view">
+        {view.v === "home" && <Home go={go} open={open} />}
+        {view.v !== "home" && (
+          <div className="wrap page">
+            {view.v === "cat" && <Category id={view.id} open={open} products={products} go={go} />}
+            {view.v === "search" && <Search q={view.q} open={open} products={products} />}
+            {view.v === "product" && <ProductPage p={products.find((p) => p.id === view.id)!} from={view.from} buy={buy} open={open} products={products} />}
+            {view.v === "gift" && <GiftFinder open={open} products={products} />}
+            {view.v === "scan" && <Scan open={open} buy={buy} />}
+            {view.v === "admin" && <Admin products={products} setProducts={setProducts} setToast={setToast} />}
+          </div>
+        )}
+      </main>
+
+      <footer>
+        <div className="wrap cols">
+          <div style={{ display: "grid", gap: 10 }}>
+            <span className="logo-name">קונים חכם</span>
+            <p>האתר מציג מוצרים מ-AliExpress ומוצא עבורכם את המחירים הזולים ביותר. הרכישה, המשלוח והאחריות הם מול AliExpress. מחירי החנויות בישראל הם הערכה להמחשה.</p>
+          </div>
+          <div style={{ display: "grid", gap: 4, alignContent: "start" }}>
+            <a href="accessibility.html">הצהרת נגישות</a>
+            <a href="privacy.html">מדיניות פרטיות</a>
+            <a href="terms.html">תקנון ותנאי שימוש</a>
+            <a href="cookies.html">מדיניות עוגיות</a>
+            <a href="returns.html">החזרות והחזר כספי</a>
+            <button onClick={() => setConsentOpen(true)}>הגדרות עוגיות</button>
+            {import.meta.env.DEV && <button onClick={() => go({ v: "admin" })}>ממשק ניהול (לערן)</button>}
+          </div>
+        </div>
+        <div className="wrap copy">© {new Date().getFullYear()} קונים חכם. תמונות המוצרים מ-AliExpress, כל הזכויות שמורות לבעליהן.</div>
+      </footer>
+
+      {consentOpen && (
+        <div className="consent" role="region" aria-label="הסכמה לעוגיות">
+          <p>אנחנו רוצים למדוד בעילום שם כמה אנשים משתמשים באתר, כדי לשפר אותו. זה קורה רק אם תאשרו. <a href="cookies.html">מדיניות עוגיות</a></p>
+          <div className="consent-btns">
+            <button className="btn btn-gold" onClick={() => decide(true)}>מאשר מדידה</button>
+            <button className="btn btn-line" onClick={() => decide(false)}>רק הכרחי</button>
+          </div>
+        </div>
+      )}
+      {toast && <div className="toast" role="status">{toast}</div>}
+    </>
+  );
+}
+
+/* ---------- shared ---------- */
+function Card({ p, onOpen, i = 0 }: { p: Product; onOpen: () => void; i?: number }) {
+  const tilt = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.pointerType !== "mouse") return;
+    const r = e.currentTarget.getBoundingClientRect();
+    e.currentTarget.style.setProperty("--rx", `${((e.clientY - r.top) / r.height - 0.5) * -8}deg`);
+    e.currentTarget.style.setProperty("--ry", `${((e.clientX - r.left) / r.width - 0.5) * 8}deg`);
+  };
+  const reset = (e: React.PointerEvent<HTMLButtonElement>) => { e.currentTarget.style.setProperty("--rx", "0deg"); e.currentTarget.style.setProperty("--ry", "0deg"); };
+  return (
+    <button className="card rv" style={{ "--d": `${(i % 4) * 70}ms` } as React.CSSProperties} onClick={onOpen} onPointerMove={tilt} onPointerLeave={reset}>
+      <div className="thumb"><img src={p.img} alt="" loading="lazy" /><span className="off num">-{saveStore(p)}%</span></div>
+      <div className="card-body">
+        <span className="card-title">{p.title}</span>
+        <span className="price-row num"><span className="price">{ils(p.price)}</span><span className="was">בחנות ~{ils(p.store)}</span></span>
+        <span className="meta num"><Ic name="Star" size={13} />{p.rating} · {p.orders.toLocaleString("he-IL")} הזמנות</span>
+      </div>
+    </button>
+  );
+}
+const Grid = ({ items, open, from }: { items: Product[]; open: (p: Product, f: string) => void; from: string }) => (
+  <div className="grid">{items.map((p, i) => <Card key={p.id} p={p} i={i} onOpen={() => open(p, from)} />)}</div>
+);
+
+/* ---------- home ---------- */
+const DEMO = [
+  { id: "p5", store: 899, where: "רשת אלקטרוניקה" },
+  { id: "p9", store: 349, where: "חנות כלי עבודה" },
+  { id: "p1", store: 249, where: "חנות סלולר" },
+];
+const WORDS = ["בחנות", "בקניון", "אצל חבר", "ברשת"];
+
+function Home({ go, open }: { go: (v: View) => void; open: (p: Product, f: string) => void }) {
+  const [k, setK] = useState(0);
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    const a = setInterval(() => { if (!still()) setK((x) => (x + 1) % DEMO.length); }, 4200);
+    const b = setInterval(() => { if (!still()) setW((x) => (x + 1) % WORDS.length); }, 2200);
+    return () => { clearInterval(a); clearInterval(b); };
+  }, []);
+  const d = DEMO[k]; const p = byId(d.id);
+  const spot = (e: React.PointerEvent<HTMLElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    e.currentTarget.style.setProperty("--mx", `${e.clientX - r.left}px`);
+    e.currentTarget.style.setProperty("--my", `${e.clientY - r.top}px`);
+  };
+  const rail = [...PRODUCTS].sort((a, b) => saveStore(b) - saveStore(a)).slice(0, 10);
+
+  return (
+    <>
+      <section className="hero" onPointerMove={spot} aria-labelledby="hero-t">
+        <div className="aurora" aria-hidden="true"><i /><i /><i /></div>
+        <div className="wrap hero-in">
+          <div className="hero-copy">
+            <span className="eyebrow gold">צלם ומצא · חיסכון אמיתי</span>
+            <h1 id="hero-t">ראיתם מוצר <span className="swap" key={w}>{WORDS[w]}</span>?<br />צלמו אותו.<br /><em>קבלו אותו בזול.</em></h1>
+            <p>מצלמים את המוצר, ואנחנו מזהים אותו ומוצאים אותו ב-AliExpress, בדרך כלל בחצי מהמחיר שראיתם ומשלוח עד הבית.</p>
+            <div className="hero-cta">
+              <button className="btn btn-gold btn-lg" onClick={() => go({ v: "scan" })}><Ic name="Camera" size={20} />צלמו מוצר עכשיו</button>
+              <a className="btn btn-line" href="#how">איך זה עובד</a>
+            </div>
+          </div>
+
+          <div className="phone" role="img" aria-label={`הדגמה: ${p.title}, ${ils(d.store)} ב${d.where}, ${ils(p.price)} אצלנו`}>
+            <div className="phone-screen" key={k}>
+              <img src={p.img} alt="" className="phone-img" />
+              <span className="scanline" aria-hidden="true" />
+              <span className="corner c1" /><span className="corner c2" /><span className="corner c3" /><span className="corner c4" />
+              <div className="tag tag-store num"><small>{d.where}</small><s>{ils(d.store)}</s></div>
+              <div className="tag tag-ali num"><small>אצלנו ב-AliExpress</small><b>{ils(p.price)}</b></div>
+              <div className="tag tag-save num">חסכתם {ils(d.store - p.price)}</div>
+            </div>
+            <div className="phone-dots" aria-hidden="true">{DEMO.map((_, i) => <i key={i} className={i === k ? "on" : ""} />)}</div>
+          </div>
+        </div>
+      </section>
+
+      <section className="stats wrap" aria-label="במספרים">
+        <div className="stat rv"><b><CountUp to={3} /></b><span>שניות לזיהוי מוצר</span></div>
+        <div className="stat rv" style={{ "--d": "80ms" } as React.CSSProperties}><b><CountUp to={60} suffix="%" /></b><span>חיסכון ממוצע מול מחיר בחנות*</span></div>
+        <div className="stat rv" style={{ "--d": "160ms" } as React.CSSProperties}><b><CountUp to={0} suffix=" ₪" /></b><span>בלי הרשמה ובלי תשלום</span></div>
+      </section>
+
+      <section id="how" className="wrap section">
+        <div className="section-head rv"><span className="eyebrow">איך זה עובד</span><h2>שלושה צעדים, ואתם חוסכים</h2></div>
+        <ol className="how">
+          {[
+            { ic: "Camera", t: "מצלמים", s: "בחנות, בקניון או אצל חבר. גם צילום מסך מאינסטגרם עובד." },
+            { ic: "ScanSearch", t: "אנחנו מזהים", s: "הבינה המלאכותית מזהה את המוצר ומחפשת אותו אצל מאות מוכרים." },
+            { ic: "BadgePercent", t: "קונים בזול", s: "מקבלים את ההצעה הטובה ביותר, עם דירוג מוכר וזמן משלוח." },
+          ].map((s, i) => (
+            <li key={s.t} className="how-step rv" style={{ "--d": `${i * 110}ms` } as React.CSSProperties}>
+              <span className="how-n num" aria-hidden="true">{i + 1}</span><span className="how-ic"><Ic name={s.ic} size={26} /></span><b>{s.t}</b><span>{s.s}</span>
+            </li>
+          ))}
+        </ol>
+      </section>
+
+      <section className="wrap section">
+        <div className="section-head rv"><span className="eyebrow">קטגוריות</span><h2>מה מחפשים היום?</h2></div>
+        <div className="cats">
+          {CATEGORIES.map((c, i) => (
+            <button key={c.id} className={`cat rv ${i === 0 ? "cat-big" : ""}`} style={{ "--d": `${i * 70}ms` } as React.CSSProperties} onClick={() => go({ v: "cat", id: c.id })}>
+              <img src={img(c.cover)} alt="" loading="lazy" />
+              <span className="cat-cap"><b>{c.name}</b><small>{c.line}</small></span>
+              <span className="cat-go"><Ic name="ArrowLeft" size={18} /></span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="section rail-wrap" aria-labelledby="rail-t">
+        <div className="wrap section-head rv"><span className="eyebrow">החיסכון הכי גדול</span><h2 id="rail-t">המציאות של השבוע</h2></div>
+        <div className="rail">
+          <div className="rail-track">
+            {[0, 1].map((r) => rail.map((p) => (
+              <button key={r + p.id} className="rail-card" tabIndex={r ? -1 : 0} aria-hidden={r === 1} onClick={() => open(p, "קטלוג")}>
+                <img src={p.img} alt="" loading="lazy" />
+                <span className="rail-off num">-{saveStore(p)}%</span>
+                <span className="rail-t">{p.title}</span>
+                <span className="num"><b className="price">{ils(p.price)}</b> <s className="was">{ils(p.store)}</s></span>
+              </button>
+            )))}
+          </div>
+        </div>
+      </section>
+
+      <section className="wrap section">
+        <button className="gift-band rv" onClick={() => go({ v: "gift" })}>
+          <span className="gift-imgs" aria-hidden="true">{["p3", "p14", "p20"].map((id) => <img key={id} src={img(id)} alt="" />)}</span>
+          <span className="gift-copy"><span className="eyebrow gold">מוצא מתנות</span><b>לא יודעים מה לקנות? 4 שאלות, ויש לכם מתנה.</b><span className="link-gold">למוצא המתנות <Ic name="ArrowLeft" size={16} /></span></span>
+        </button>
+        <p className="foot-note">* מחירי החנויות בישראל באתר הם הערכה להמחשה. המחיר הסופי נקבע ב-AliExpress.</p>
+      </section>
+    </>
+  );
+}
+
+/* ---------- category / search ---------- */
+function Category({ id, open, products, go }: { id: CatId; open: (p: Product, f: string) => void; products: Product[]; go: (v: View) => void }) {
+  const c = CATEGORIES.find((x) => x.id === id)!;
+  const [max, setMax] = useState(0);
+  const [sort, setSort] = useState("off");
+  const items = useMemo(() => {
+    const r = products.filter((p) => p.cat === id && (!max || p.price <= max));
+    return [...r].sort((a, b) => sort === "price" ? a.price - b.price : sort === "orders" ? b.orders - a.orders : saveStore(b) - saveStore(a));
+  }, [id, max, sort, products]);
+  return (
+    <div style={{ display: "grid", gap: 20 }}>
+      <div className="cat-tabs" role="tablist" aria-label="קטגוריות">
+        {CATEGORIES.map((x) => (
+          <button key={x.id} role="tab" aria-selected={x.id === id} onClick={() => go({ v: "cat", id: x.id })}>
+            <img src={img(x.cover)} alt="" />{x.short}
+          </button>
+        ))}
+      </div>
+      <div className="page-title"><span className="eyebrow">קטגוריה</span><h1>{c.name}</h1><div className="chips">{c.subs.map((s) => <span key={s} className="chip">{s}</span>)}</div></div>
+      <div className="chips" style={{ alignItems: "center" }}>
+        <label htmlFor="max" className="eyebrow">עד מחיר</label>
+        <select id="max" className="chip" value={max} onChange={(e) => setMax(+e.target.value)}>
+          <option value={0}>הכול</option>{BUDGETS.map((b) => <option key={b} value={b}>{ils(b)}</option>)}
+        </select>
+        <label htmlFor="sort" className="eyebrow">מיון</label>
+        <select id="sort" className="chip" value={sort} onChange={(e) => setSort(e.target.value)}>
+          <option value="off">חיסכון הכי גדול</option><option value="price">מחיר נמוך</option><option value="orders">הכי נמכר</option>
+        </select>
+      </div>
+      {items.length ? <Grid items={items} open={open} from="קטלוג" /> : <p className="demo-note">אין מוצרים בטווח המחיר הזה. נסו להרחיב את הסינון.</p>}
+    </div>
+  );
+}
+function Search({ q, open, products }: { q: string; open: (p: Product, f: string) => void; products: Product[] }) {
+  const items = products.filter((p) => (p.title + p.desc).includes(q));
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <div className="page-title"><span className="eyebrow">תוצאות חיפוש</span><h1>"{q}"</h1></div>
+      {items.length ? <Grid items={items} open={open} from="קטלוג" /> : <p className="demo-note">לא מצאנו במאגר. בגרסה המלאה החיפוש ימשיך ל-AliExpress ויחזיר תוצאות עם הלינק שלך.</p>}
+    </div>
+  );
+}
+
+/* ---------- product ---------- */
+function ProductPage({ p, from, buy, open, products }: { p: Product; from: string; buy: (p: Product, f: string) => void; open: (p: Product, f: string) => void; products: Product[] }) {
+  const similar = products.filter((x) => x.cat === p.cat && x.id !== p.id).slice(0, 4);
+  const cat = CATEGORIES.find((c) => c.id === p.cat)!;
+  return (
+    <div style={{ display: "grid", gap: 32 }}>
+      <div className="product">
+        <div className="product-img rv"><img src={p.img} alt={p.title} /><span className="off num">-{saveStore(p)}%</span></div>
+        <div className="rv" style={{ display: "grid", gap: 14, alignContent: "start", "--d": "100ms" } as React.CSSProperties}>
+          <span className="eyebrow">{cat.name}</span>
+          <h1 style={{ margin: 0, fontSize: "clamp(26px,3.4vw,36px)" }}>{p.title}</h1>
+          <span className="meta num"><Ic name="Star" size={15} />{p.rating} מתוך 5 · {p.orders.toLocaleString("he-IL")} הזמנות</span>
+          <div className="vs num">
+            <div><small>בחנות בישראל (הערכה)</small><s>{ils(p.store)}</s></div>
+            <Ic name="ArrowLeft" size={20} />
+            <div className="vs-ali"><small>אצלנו ב-AliExpress</small><b>{ils(p.price)}</b></div>
+            <span className="chip chip-good">חוסכים {ils(p.store - p.price)}</span>
+          </div>
+          {p.coupon && <div className="coupon">קופון <b dir="ltr">{p.coupon}</b> מוריד עוד כמה שקלים בקופה</div>}
+          <p style={{ margin: 0 }}>{p.desc}</p>
+          <div className="pc">
+            <div><b style={{ color: "var(--good)" }}>מה טוב</b><ul>{p.pros.map((x) => <li key={x}>{x}</li>)}</ul></div>
+            <div><b style={{ color: "var(--price)" }}>שימו לב</b><ul>{p.cons.map((x) => <li key={x}>{x}</li>)}</ul></div>
+          </div>
+          <button className="btn btn-gold btn-lg" onClick={() => buy(p, from)}>לקנייה ב-AliExpress<Ic name="ExternalLink" size={18} /></button>
+          <span className="disclose">חיפשנו והשווינו עבורכם: זה המחיר הכי משתלם שמצאנו למוצר, ישירות מ-AliExpress.</span>
+        </div>
+      </div>
+      {similar.length > 0 && <section className="section" style={{ marginTop: 0 }}><div className="section-head"><h2>עוד ב{cat.name}</h2></div><Grid items={similar} open={open} from={from} /></section>}
+    </div>
+  );
+}
+
+/* ---------- scan (photo → cheaper) ---------- */
+function Scan({ open, buy }: { open: (p: Product, f: string) => void; buy: (p: Product, f: string) => void }) {
+  const [pic, setPic] = useState(""); const [state, setState] = useState<"idle" | "busy" | "done" | "bad">("idle");
+  const [store, setStore] = useState("");
+  const run = (src: string) => { setPic(src); setState("busy"); setTimeout(() => setState("done"), 2200); };
+  const onFile = (f?: File) => {
+    if (!f) return;
+    if (!/^image\/(jpeg|png|webp|heic)$/.test(f.type) || f.size > 8 * 1024 * 1024) { setPic(""); setState("bad"); return; }
+    const r = new FileReader(); r.onload = () => run(String(r.result)); r.readAsDataURL(f);
+  };
+  const best = byId("p5");
+  const others = ["p7", "p6", "p8"].map(byId);
+  const storeN = +store || 899;
+  return (
+    <div style={{ display: "grid", gap: 20 }}>
+      <div className="page-title"><span className="eyebrow gold-ink">צלם ומצא</span><h1>ראיתם בחנות? צלמו, ונמצא לכם בזול.</h1><p>מצלמים את המוצר או את המדבקה שלו, ותוך שניות מקבלים את אותו מוצר ב-AliExpress עם המחיר הכי טוב.</p></div>
+      <p className="beta" role="note"><b>גרסת הרצה:</b> הזיהוי האוטומטי של המוצר עדיין בפיתוח. כרגע מוצגת תוצאה לדוגמה, כדי שתראו איך זה יעבוד.</p>
+      <div className="panel scan-panel">
+        {state === "idle" || state === "bad" ? (
+          <div className="drop">
+            <span className="drop-ring"><Ic name="Camera" size={40} /></span>
+            <div className="drop-btns">
+              <input id="cam" type="file" accept="image/*" capture="environment" className="sr-only" aria-describedby="scan-privacy" onChange={(e) => onFile(e.target.files?.[0])} />
+              <label className="btn btn-gold btn-lg" htmlFor="cam"><Ic name="Camera" size={20} />צילום עכשיו</label>
+              <input id="file" type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" aria-describedby="scan-privacy" onChange={(e) => onFile(e.target.files?.[0])} />
+              <label className="btn btn-line" htmlFor="file"><Ic name="Upload" size={18} />מהגלריה</label>
+            </div>
+            <button className="link" onClick={() => run(best.img)}>או נסו עם תמונה לדוגמה (מצלמת דרך בחנות)</button>
+            <span className="disclose" id="scan-privacy">JPG, PNG או WEBP עד 8MB. בגרסה הזו התמונה נשארת במכשיר שלכם ולא נשלחת אלינו. <a href="privacy.html">מדיניות פרטיות</a></span>
+            {state === "bad" && <p role="alert" style={{ color: "var(--price)", margin: 0 }}>אפשר להעלות רק תמונה עד 8MB. נסו תמונה אחרת.</p>}
+          </div>
+        ) : (
+          <div className="scan-result">
+            <div className={`scan-shot ${state === "busy" ? "busy" : ""}`}>
+              <img src={pic} alt="התמונה שצילמתם" />
+              {state === "busy" && <><span className="scanline" aria-hidden="true" /><span className="corner c1" /><span className="corner c2" /><span className="corner c3" /><span className="corner c4" /></>}
+            </div>
+            {state === "busy" && <p className="meta scan-status" role="status"><Ic name="Sparkles" size={18} />מזהים את המוצר ומשווים מחירים אצל מאות מוכרים...</p>}
+            {state === "done" && (
+              <div className="found rv in" role="status">
+                <span className="chip chip-good">זיהינו: מצלמת דרך 4K עם 3 ערוצים</span>
+                <h2>{best.title}</h2>
+                <div className="field" style={{ maxWidth: 260 }}>
+                  <label htmlFor="sp">כמה זה עלה בחנות? (לא חובה)</label>
+                  <input id="sp" inputMode="numeric" value={store} placeholder="899" onChange={(e) => setStore(e.target.value.replace(/\D/g, ""))} />
+                </div>
+                <div className="vs num">
+                  <div><small>בחנות</small><s>{ils(storeN)}</s></div>
+                  <Ic name="ArrowLeft" size={20} />
+                  <div className="vs-ali"><small>ב-AliExpress, משלוח עד הבית</small><b>{ils(best.price)}</b></div>
+                </div>
+                {storeN > best.price && <div className="save-big num">חוסכים {ils(storeN - best.price)}<small>{Math.round((1 - best.price / storeN) * 100)}% פחות מהחנות</small></div>}
+                <div className="hero-cta">
+                  <button className="btn btn-gold btn-lg" onClick={() => buy(best, "צלם ומצא")}>לקנייה במחיר הזה<Ic name="ExternalLink" size={18} /></button>
+                  <button className="btn btn-line" onClick={() => { setState("idle"); setPic(""); setStore(""); }}>לצלם מוצר אחר</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      {state === "done" && (
+        <section className="section" style={{ marginTop: 0 }}>
+          <div className="section-head"><h2>עוד דברים שכדאי לקנות באלי ולא בחנות</h2></div>
+          <Grid items={others} open={open} from="צלם ומצא" />
+          <p className="demo-note">הדגמה: תמיד מזוהה אותו מוצר. בגרסה המלאה הזיהוי נעשה עם AI והחיפוש ב-AliExpress.</p>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/* ---------- gift finder ---------- */
+function GiftFinder({ open, products }: { open: (p: Product, f: string) => void; products: Product[] }) {
+  const [step, setStep] = useState(0);
+  const [who, setWho] = useState(""); const [likes, setLikes] = useState<string[]>([]); const [budget, setBudget] = useState(0); const [occ, setOcc] = useState("");
+  const results = useMemo(() => {
+    const r = products.filter((p) => p.price <= budget && (likes.length === 0 || likes.includes(p.cat)));
+    return r.sort((a, b) => (b.recipients.includes(who) ? 1 : 0) - (a.recipients.includes(who) ? 1 : 0) || saveStore(b) - saveStore(a)).slice(0, 5);
+  }, [products, budget, likes, who]);
+  const qs = [
+    { t: "למי המתנה?", body: <div className="options">{RECIPIENTS.map((r) => <button key={r.id} className="opt" aria-pressed={who === r.id} onClick={() => { setWho(r.id); setStep(1); }}>{r.label}</button>)}</div> },
+    { t: "במה הוא או היא מתעניינים? (אפשר כמה)", body: <><div className="options">{INTERESTS.map((r) => <button key={r.id} className="opt" aria-pressed={likes.includes(r.id)} onClick={() => setLikes(likes.includes(r.id) ? likes.filter((x) => x !== r.id) : [...likes, r.id])}>{r.label}</button>)}</div><button className="btn btn-gold" style={{ justifySelf: "start" }} onClick={() => setStep(2)}>המשך</button></> },
+    { t: "מה התקציב?", body: <div className="options">{BUDGETS.map((b) => <button key={b} className="opt num" aria-pressed={budget === b} onClick={() => { setBudget(b); setStep(3); }}>עד {ils(b)}</button>)}</div> },
+    { t: "לאיזה אירוע?", body: <div className="options">{["יום הולדת", "יום נישואין", "חג", "סתם כי בא לי"].map((o) => <button key={o} className="opt" aria-pressed={occ === o} onClick={() => { setOcc(o); setStep(4); }}>{o}</button>)}</div> },
+  ];
+  return (
+    <div style={{ display: "grid", gap: 20 }}>
+      <div className="page-title"><span className="eyebrow gold-ink">מוצא מתנות</span><h1>4 שאלות, ויש לכם מתנה</h1><p>עונים מהר, מקבלים 5 רעיונות בתקציב שבחרתם. אפשר לחזור אחורה בכל שלב.</p></div>
+      <div className="panel">
+        <div className="steps" aria-hidden="true">{[0, 1, 2, 3].map((i) => <i key={i} className={i <= step ? "on" : ""} />)}</div>
+        {step < 4 ? (
+          <div key={step} className="step-in" style={{ display: "grid", gap: 16 }}><h2 style={{ margin: 0, fontSize: 26 }}>{qs[step].t}</h2>{qs[step].body}
+            {step > 0 && <button className="link" onClick={() => setStep(step - 1)}><Ic name="ChevronRight" size={16} />חזרה</button>}</div>
+        ) : (
+          <>
+            <div className="section-head"><h2 style={{ margin: 0, fontSize: 24 }}>{results.length} רעיונות ל{RECIPIENTS.find((r) => r.id === who)?.label}, עד {ils(budget)}, ל{occ}</h2>
+              <button className="link" onClick={() => { setStep(0); setLikes([]); }}>להתחיל מחדש</button></div>
+            {results.length ? <Grid items={results} open={open} from="מוצא מתנות" /> : <p className="demo-note">אין התאמה במאגר הקטן של ההדגמה. בגרסה המלאה נשלים מ-AliExpress.</p>}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- admin ---------- */
+function Admin({ products, setProducts, setToast }: { products: Product[]; setProducts: (p: Product[]) => void; setToast: (s: string) => void }) {
+  const [f, setF] = useState({ link: "", title: "", price: "", store: "", cat: "gadgets" as CatId });
+  const max = Math.max(...MODULE_STATS.map((m) => m.earn));
+  const add = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!f.link || !f.title || !f.price) { setToast("צריך לינק, שם ומחיר כדי להוסיף מוצר"); return; }
+    const price = +f.price;
+    setProducts([{ id: "n" + Date.now(), ali: "", title: f.title, cat: f.cat, price, orig: Math.round(price * 1.8), store: +f.store || Math.round(price * 3), rating: 4.5, orders: 0, img: img(CATEGORIES.find((c) => c.id === f.cat)!.cover), desc: "תיאור בעברית ייכתב אוטומטית.", pros: ["ייכתב אוטומטית"], cons: ["ייכתב אוטומטית"], recipients: [] }, ...products]);
+    setF({ link: "", title: "", price: "", store: "", cat: f.cat });
+    setToast("המוצר נוסף לקטגוריה");
+  };
+  return (
+    <div style={{ display: "grid", gap: 20 }}>
+      <div className="page-title"><span className="eyebrow">ממשק ניהול · נתוני דוגמה</span><h1>מי מכניס כסף החודש</h1><p>כל מודול עובד עם Tracking ID משלו, כך שרואים בדיוק מאיפה מגיעות ההזמנות.</p></div>
+      <div className="panel">
+        <div className="bars">
+          {MODULE_STATS.map((m) => (
+            <div key={m.id} className="bar-row num"><span>{m.label}</span><span className="bar"><i style={{ width: `${(m.earn / max) * 100}%` }} /></span><b>{ils(m.earn)}</b></div>
+          ))}
+        </div>
+        <div className="table-wrap"><table className="num"><thead><tr><th>מודול</th><th>לחיצות</th><th>הזמנות</th><th>המרה</th><th>עמלה</th></tr></thead>
+          <tbody>{MODULE_STATS.map((m) => <tr key={m.id}><td>{m.label}</td><td>{m.clicks.toLocaleString("he-IL")}</td><td>{m.orders}</td><td>{((m.orders / m.clicks) * 100).toFixed(1)}%</td><td>{ils(m.earn)}</td></tr>)}</tbody></table></div>
+      </div>
+      <form className="panel" onSubmit={add}>
+        <h2 style={{ margin: 0, fontSize: 22 }}>הוספת מוצר מלינק Portals</h2>
+        <div className="form-grid">
+          <div className="field"><label htmlFor="a-link">לינק אפיליאט</label><input id="a-link" dir="ltr" value={f.link} onChange={(e) => setF({ ...f, link: e.target.value })} placeholder="https://s.click.aliexpress.com/e/..." /></div>
+          <div className="field"><label htmlFor="a-title">שם המוצר</label><input id="a-title" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} /></div>
+          <div className="field"><label htmlFor="a-price">מחיר באלי (₪)</label><input id="a-price" inputMode="numeric" value={f.price} onChange={(e) => setF({ ...f, price: e.target.value.replace(/\D/g, "") })} /></div>
+          <div className="field"><label htmlFor="a-store">מחיר בחנות בישראל (₪)</label><input id="a-store" inputMode="numeric" value={f.store} onChange={(e) => setF({ ...f, store: e.target.value.replace(/\D/g, "") })} /></div>
+          <div className="field"><label htmlFor="a-cat">קטגוריה</label><select id="a-cat" value={f.cat} onChange={(e) => setF({ ...f, cat: e.target.value as CatId })}>{CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+        </div>
+        <button className="btn btn-gold" type="submit" style={{ justifySelf: "start" }}><Ic name="Plus" size={18} />הוספה לאתר</button>
+        <span className="disclose">בגרסה האמיתית: התמונה המקורית, הכותרת והתיאור נמשכים אוטומטית מהלינק, ואתה מאשר לפני פרסום.</span>
+      </form>
+    </div>
+  );
+}
+

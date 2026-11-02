@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "prototype",
+      "runtimeExecutable": "py",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "5178",
+        "-d",
+        "prototype"
+      ],
+      "port": 5178
+    },
+    {
+      "name": "site",
+      "runtimeExecutable": "py",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "5179",
+        "-d",
+        "site"
+      ],
+      "port": 5179
+    }
+  ]
+}
