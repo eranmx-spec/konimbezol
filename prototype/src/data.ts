@@ -1,13 +1,16 @@
 export type CatId = "gadgets" | "car" | "tools" | "home" | "trips";
+// product types outside the five catalog categories still serve search and the gift finder
+export type ShopCat = CatId | "fashion" | "beauty" | "kids" | "sport" | "pets";
 
 export type Product = {
   id: string;
   ali: string; // AliExpress item id
   title: string;
-  cat: CatId;
+  cat: ShopCat;
+  type?: string; // product type from scan/labels.json
   price: number;
   orig: number;
-  store: number; // typical Israeli store price (demo estimate)
+  store: number; // typical Israeli store price (demo estimate); 0 when we have no estimate
   rating: number;
   orders: number;
   img: string;
@@ -17,6 +20,8 @@ export type Product = {
   coupon?: string;
   recipients: string[];
 };
+
+import SHOP_JSON from "./shop.json";
 
 // real product photos pulled from AliExpress listings, inlined at build time
 const IMGS = import.meta.glob("./img/*.webp", { eager: true, import: "default" }) as Record<string, string>;
@@ -32,7 +37,7 @@ export const CATEGORIES: { id: CatId; name: string; short: string; cover: string
 
 const P = (p: Omit<Product, "img">): Product => ({ ...p, img: img(p.id) });
 
-export const PRODUCTS: Product[] = [
+export const CURATED: Product[] = [
   P({ id: "p1", ali: "1005008870372901", title: "אוזניות Baseus EP10 Pro עם סינון רעשים ANC", cat: "gadgets", price: 75.27, orig: 132.33, store: 249, rating: 4.8, orders: 20000,
     desc: "סינון רעשים עד 50dB, Bluetooth 6.0, שישה מיקרופונים לשיחות ועמידות במים IP55.", pros: ["סינון רעשים שמורגש באוטובוס", "שיחות ברורות"], cons: ["האפליקציה באנגלית בלבד"], coupon: "IL12", recipients: ["man", "woman", "teen"] }),
   P({ id: "p2", ali: "1005005925834800", title: "מטען Baseus GaN מהיר 65W", cat: "gadgets", price: 59.71, orig: 165.38, store: 199, rating: 4.8, orders: 9000,
@@ -74,6 +79,18 @@ export const PRODUCTS: Product[] = [
   P({ id: "p20", ali: "1005012825227215", title: "רחפן מיני עם מצלמה כפולה ושלט עם מסך", cat: "gadgets", price: 149.39, orig: 311.23, store: 449, rating: 4.2, orders: 36,
     desc: "רחפן קטן עם מצלמה כפולה, ריחוף אוטומטי והתחמקות ממכשולים.", pros: ["קל להטסה", "שלט עם מסך"], cons: ["המצלמה לא באיכות מקצועית"], recipients: ["kid", "teen"] }),
 ];
+
+// the best-selling value pick for every other product type, from AliExpress Portals (scan/build_shop.mjs)
+// the hand-picked products by product type, so the gift finder suggests one product per type
+const CURATED_TYPES = ["earbuds", "charger", "smartwatch", "power-bank", "dash-cam", "tire-inflator", "car-phone-holder", "car-vacuum",
+  "drill", "laser-measure", "socket-set", "food-containers", "spice-rack", "milk-frother", "sensor-light", "headlamp", "cooler", "hammock", "thermos", "drone"];
+CURATED.forEach((p, i) => { p.type = CURATED_TYPES[i]; });
+type ShopItem = { id: string; ali: string; type: string; cat: ShopCat; title: string; price: number; orig: number; orders: number; img: string; recipients: string[] };
+const SHOP: Product[] = (SHOP_JSON as ShopItem[]).map((s) => ({
+  id: s.id, ali: s.ali, type: s.type, title: s.title, cat: s.cat, price: s.price, orig: s.orig, store: 0, rating: 0, orders: s.orders,
+  img: s.img, desc: "", pros: [], cons: [], recipients: s.recipients,
+}));
+export const PRODUCTS: Product[] = [...CURATED, ...SHOP];
 
 export const RECIPIENTS = [
   { id: "man", label: "גבר" },

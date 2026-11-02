@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Icons from "lucide-react";
-import { BUDGETS, CATEGORIES, INTERESTS, MODULE_STATS, PRODUCTS, RECIPIENTS, img } from "./data";
+import { BUDGETS, CATEGORIES, CURATED as PICKS, INTERESTS, MODULE_STATS, PRODUCTS, RECIPIENTS, img } from "./data";
 import type { CatId, Product } from "./data";
 import { allLabels, itemsFor, onProgress, recognize, warmup } from "./recognize";
 import type { Guess, ScanItem, ScanLabel } from "./recognize";
@@ -15,7 +15,9 @@ const Ic = ({ name, size = 22 }: { name: string; size?: number }) => {
   return <C size={size} aria-hidden="true" />;
 };
 const ils = (n: number) => `${n.toLocaleString("he-IL")} ₪`;
-const saveStore = (p: Product) => Math.round((1 - p.price / p.store) * 100);
+// compared with the Israeli store estimate when we have one, otherwise with the AliExpress price before discount
+const wasPrice = (p: Product) => p.store || p.orig;
+const saveStore = (p: Product) => (wasPrice(p) > p.price ? Math.round((1 - p.price / wasPrice(p)) * 100) : 0);
 const byId = (id: string) => PRODUCTS.find((p) => p.id === id)!;
 // the admin demo stays out of the public build
 const PAGES = import.meta.env.DEV ? ["scan", "gift", "admin"] : ["scan", "gift"];
@@ -45,14 +47,23 @@ function fromHash(): View {
   return { v: "home" };
 }
 
-// fade-up elements marked .rv as they scroll into view
+// fade-up elements marked .rv as they scroll into view, including ones rendered later (gift results, filtered grids)
 function useReveal(dep: unknown) {
   useEffect(() => {
-    const els = document.querySelectorAll<HTMLElement>(".rv:not(.in)");
-    if (!("IntersectionObserver" in window)) { els.forEach((e) => e.classList.add("in")); return; }
+    if (!("IntersectionObserver" in window)) {
+      const showAll = () => document.querySelectorAll<HTMLElement>(".rv:not(.in)").forEach((e) => e.classList.add("in"));
+      showAll();
+      const mo = new MutationObserver(showAll);
+      mo.observe(document.body, { childList: true, subtree: true });
+      return () => mo.disconnect();
+    }
     const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { rootMargin: "0px 0px -8% 0px" });
-    els.forEach((e) => io.observe(e));
-    return () => io.disconnect();
+    const watched = new WeakSet<Element>();
+    const scan = () => document.querySelectorAll<HTMLElement>(".rv:not(.in)").forEach((e) => { if (!watched.has(e)) { watched.add(e); io.observe(e); } });
+    scan();
+    const mo = new MutationObserver(scan);
+    mo.observe(document.body, { childList: true, subtree: true });
+    return () => { mo.disconnect(); io.disconnect(); };
   }, [dep]);
 }
 
@@ -125,8 +136,8 @@ export default function App() {
             <span><span className="logo-name">קונים חכם</span><span className="logo-sub">ראיתם בחנות. קניתם בחכמה.</span></span>
           </button>
           <nav className="nav" aria-label="ניווט ראשי">
-            <button aria-current={view.v === "scan" ? "page" : undefined} onClick={() => go({ v: "scan" })} className="nav-cta"><Ic name="Camera" size={16} />צלם ומצא</button>
             <button aria-current={view.v === "cat" ? "page" : undefined} onClick={() => go({ v: "cat", id: "gadgets" })}>קטגוריות</button>
+            <button aria-current={view.v === "scan" ? "page" : undefined} onClick={() => go({ v: "scan" })} className="nav-cta"><Ic name="Camera" size={16} />צלם ומצא</button>
             <button aria-current={view.v === "gift" ? "page" : undefined} onClick={() => go({ v: "gift" })}>מוצא מתנות</button>
           </nav>
           <form className="search" role="search" onSubmit={(e) => { e.preventDefault(); if (q.trim()) go({ v: "search", q: q.trim() }); }}>
@@ -195,11 +206,11 @@ function Card({ p, onOpen, i = 0 }: { p: Product; onOpen: () => void; i?: number
   const reset = (e: React.PointerEvent<HTMLButtonElement>) => { e.currentTarget.style.setProperty("--rx", "0deg"); e.currentTarget.style.setProperty("--ry", "0deg"); };
   return (
     <button className="card rv" style={{ "--d": `${(i % 4) * 70}ms` } as React.CSSProperties} onClick={onOpen} onPointerMove={tilt} onPointerLeave={reset}>
-      <div className="thumb"><img src={p.img} alt="" loading="lazy" /><span className="off num">-{saveStore(p)}%</span></div>
+      <div className="thumb"><img src={p.img} alt="" loading="lazy" referrerPolicy="no-referrer" />{saveStore(p) >= 10 && <span className="off num">-{saveStore(p)}%</span>}</div>
       <div className="card-body">
         <span className="card-title">{p.title}</span>
-        <span className="price-row num"><span className="price">{ils(p.price)}</span><span className="was">בחנות ~{ils(p.store)}</span></span>
-        <span className="meta num"><Ic name="Star" size={13} />{p.rating} · {p.orders.toLocaleString("he-IL")} הזמנות</span>
+        <span className="price-row num"><span className="price">{ils(p.price)}</span>{p.store ? <span className="was">בחנות ~{ils(p.store)}</span> : saveStore(p) > 0 && <span className="was"><s>{ils(p.orig)}</s></span>}</span>
+        <span className="meta num">{p.rating ? <><Ic name="Star" size={13} />{p.rating} · {p.orders.toLocaleString("he-IL")} הזמנות</> : soldText(p.orders)}</span>
       </div>
     </button>
   );
@@ -230,60 +241,12 @@ function Home({ go, open }: { go: (v: View) => void; open: (p: Product, f: strin
     e.currentTarget.style.setProperty("--mx", `${e.clientX - r.left}px`);
     e.currentTarget.style.setProperty("--my", `${e.clientY - r.top}px`);
   };
-  const rail = [...PRODUCTS].sort((a, b) => saveStore(b) - saveStore(a)).slice(0, 10);
+  const rail = [...PICKS].sort((a, b) => saveStore(b) - saveStore(a)).slice(0, 10);
 
   return (
     <>
-      <section className="hero" onPointerMove={spot} aria-labelledby="hero-t">
-        <div className="aurora" aria-hidden="true"><i /><i /><i /></div>
-        <div className="wrap hero-in">
-          <div className="hero-copy">
-            <span className="eyebrow gold">צלם ומצא · חיסכון אמיתי</span>
-            <h1 id="hero-t">ראיתם מוצר <span className="swap" key={w}>{WORDS[w]}</span>?<br />צלמו אותו.<br /><em>קבלו אותו בזול.</em></h1>
-            <p>מצלמים את המוצר, ואנחנו מזהים אותו ומוצאים אותו ב-AliExpress, בדרך כלל בחצי מהמחיר שראיתם ומשלוח עד הבית.</p>
-            <div className="hero-cta">
-              <button className="btn btn-gold btn-lg" onClick={() => go({ v: "scan" })}><Ic name="Camera" size={20} />צלמו מוצר עכשיו</button>
-              <a className="btn btn-line" href="#how">איך זה עובד</a>
-            </div>
-          </div>
-
-          <div className="phone" role="img" aria-label={`הדגמה: ${p.title}, ${ils(d.store)} ב${d.where}, ${ils(p.price)} אצלנו`}>
-            <div className="phone-screen" key={k}>
-              <img src={p.img} alt="" className="phone-img" />
-              <span className="scanline" aria-hidden="true" />
-              <span className="corner c1" /><span className="corner c2" /><span className="corner c3" /><span className="corner c4" />
-              <div className="tag tag-store num"><small>{d.where}</small><s>{ils(d.store)}</s></div>
-              <div className="tag tag-ali num"><small>אצלנו ב-AliExpress</small><b>{ils(p.price)}</b></div>
-              <div className="tag tag-save num">חסכתם {ils(d.store - p.price)}</div>
-            </div>
-            <div className="phone-dots" aria-hidden="true">{DEMO.map((_, i) => <i key={i} className={i === k ? "on" : ""} />)}</div>
-          </div>
-        </div>
-      </section>
-
-      <section className="stats wrap" aria-label="במספרים">
-        <div className="stat rv"><b><CountUp to={3} /></b><span>שניות לזיהוי מוצר</span></div>
-        <div className="stat rv" style={{ "--d": "80ms" } as React.CSSProperties}><b><CountUp to={60} suffix="%" /></b><span>חיסכון ממוצע מול מחיר בחנות*</span></div>
-        <div className="stat rv" style={{ "--d": "160ms" } as React.CSSProperties}><b><CountUp to={0} suffix=" ₪" /></b><span>בלי הרשמה ובלי תשלום</span></div>
-      </section>
-
-      <section id="how" className="wrap section">
-        <div className="section-head rv"><span className="eyebrow">איך זה עובד</span><h2>שלושה צעדים, ואתם חוסכים</h2></div>
-        <ol className="how">
-          {[
-            { ic: "Camera", t: "מצלמים", s: "בחנות, בקניון או אצל חבר. גם צילום מסך מאינסטגרם עובד." },
-            { ic: "ScanSearch", t: "אנחנו מזהים", s: "הבינה המלאכותית מזהה את המוצר ומחפשת אותו אצל מאות מוכרים." },
-            { ic: "BadgePercent", t: "קונים בזול", s: "מקבלים את ההצעה הטובה ביותר, עם דירוג מוכר וזמן משלוח." },
-          ].map((s, i) => (
-            <li key={s.t} className="how-step rv" style={{ "--d": `${i * 110}ms` } as React.CSSProperties}>
-              <span className="how-n num" aria-hidden="true">{i + 1}</span><span className="how-ic"><Ic name={s.ic} size={26} /></span><b>{s.t}</b><span>{s.s}</span>
-            </li>
-          ))}
-        </ol>
-      </section>
-
       <section className="wrap section">
-        <div className="section-head rv"><span className="eyebrow">קטגוריות</span><h2>מה מחפשים היום?</h2></div>
+        <div className="section-head rv"><span className="eyebrow">קטגוריות</span><h1>מה מחפשים היום?</h1></div>
         <div className="cats">
           {CATEGORIES.map((c, i) => (
             <button key={c.id} className={`cat rv ${i === 0 ? "cat-big" : ""}`} style={{ "--d": `${i * 70}ms` } as React.CSSProperties} onClick={() => go({ v: "cat", id: c.id })}>
@@ -309,6 +272,38 @@ function Home({ go, open }: { go: (v: View) => void; open: (p: Product, f: strin
             )))}
           </div>
         </div>
+      </section>
+
+      <section className="hero" onPointerMove={spot} aria-labelledby="hero-t">
+        <div className="aurora" aria-hidden="true"><i /><i /><i /></div>
+        <div className="wrap hero-in">
+          <div className="hero-copy">
+            <span className="eyebrow gold">צלם ומצא · חיסכון אמיתי</span>
+            <h2 id="hero-t">ראיתם מוצר <span className="swap" key={w}>{WORDS[w]}</span>?<br />צלמו אותו.<br /><em>קבלו אותו בזול.</em></h2>
+            <p>מצלמים את המוצר, ואנחנו מזהים אותו ומוצאים אותו ב-AliExpress, בדרך כלל בחצי מהמחיר שראיתם ומשלוח עד הבית.</p>
+            <div className="hero-cta">
+              <button className="btn btn-gold btn-lg" onClick={() => go({ v: "scan" })}><Ic name="Camera" size={20} />צלמו מוצר עכשיו</button>
+            </div>
+          </div>
+
+          <div className="phone" role="img" aria-label={`הדגמה: ${p.title}, ${ils(d.store)} ב${d.where}, ${ils(p.price)} אצלנו`}>
+            <div className="phone-screen" key={k}>
+              <img src={p.img} alt="" className="phone-img" />
+              <span className="scanline" aria-hidden="true" />
+              <span className="corner c1" /><span className="corner c2" /><span className="corner c3" /><span className="corner c4" />
+              <div className="tag tag-store num"><small>{d.where}</small><s>{ils(d.store)}</s></div>
+              <div className="tag tag-ali num"><small>אצלנו ב-AliExpress</small><b>{ils(p.price)}</b></div>
+              <div className="tag tag-save num">חסכתם {ils(d.store - p.price)}</div>
+            </div>
+            <div className="phone-dots" aria-hidden="true">{DEMO.map((_, i) => <i key={i} className={i === k ? "on" : ""} />)}</div>
+          </div>
+        </div>
+      </section>
+
+      <section className="stats wrap" aria-label="במספרים">
+        <div className="stat rv"><b><CountUp to={3} /></b><span>שניות לזיהוי מוצר</span></div>
+        <div className="stat rv" style={{ "--d": "80ms" } as React.CSSProperties}><b><CountUp to={60} suffix="%" /></b><span>חיסכון ממוצע מול מחיר בחנות*</span></div>
+        <div className="stat rv" style={{ "--d": "160ms" } as React.CSSProperties}><b><CountUp to={0} suffix=" ₪" /></b><span>בלי הרשמה ובלי תשלום</span></div>
       </section>
 
       <section className="wrap section">
@@ -368,32 +363,32 @@ function Search({ q, open, products }: { q: string; open: (p: Product, f: string
 /* ---------- product ---------- */
 function ProductPage({ p, from, buy, open, products }: { p: Product; from: string; buy: (p: Product, f: string) => void; open: (p: Product, f: string) => void; products: Product[] }) {
   const similar = products.filter((x) => x.cat === p.cat && x.id !== p.id).slice(0, 4);
-  const cat = CATEGORIES.find((c) => c.id === p.cat)!;
+  const cat = CATEGORIES.find((c) => c.id === p.cat);
   return (
     <div style={{ display: "grid", gap: 32 }}>
       <div className="product">
-        <div className="product-img rv"><img src={p.img} alt={p.title} /><span className="off num">-{saveStore(p)}%</span></div>
+        <div className="product-img rv"><img src={p.img} alt={p.title} referrerPolicy="no-referrer" />{saveStore(p) >= 10 && <span className="off num">-{saveStore(p)}%</span>}</div>
         <div className="rv" style={{ display: "grid", gap: 14, alignContent: "start", "--d": "100ms" } as React.CSSProperties}>
-          <span className="eyebrow">{cat.name}</span>
+          {cat && <span className="eyebrow">{cat.name}</span>}
           <h1 style={{ margin: 0, fontSize: "clamp(26px,3.4vw,36px)" }}>{p.title}</h1>
-          <span className="meta num"><Ic name="Star" size={15} />{p.rating} מתוך 5 · {p.orders.toLocaleString("he-IL")} הזמנות</span>
+          <span className="meta num">{p.rating ? <><Ic name="Star" size={15} />{p.rating} מתוך 5 · {p.orders.toLocaleString("he-IL")} הזמנות</> : soldText(p.orders)}</span>
           <div className="vs num">
-            <div><small>בחנות בישראל (הערכה)</small><s>{ils(p.store)}</s></div>
-            <Ic name="ArrowLeft" size={20} />
+            {saveStore(p) > 0 && <><div><small>{p.store ? "בחנות בישראל (הערכה)" : "לפני ההנחה"}</small><s>{ils(wasPrice(p))}</s></div>
+            <Ic name="ArrowLeft" size={20} /></>}
             <div className="vs-ali"><small>אצלנו ב-AliExpress</small><b>{ils(p.price)}</b></div>
-            <span className="chip chip-good">חוסכים {ils(p.store - p.price)}</span>
+            {saveStore(p) > 0 && <span className="chip chip-good">חוסכים {ils(Math.round((wasPrice(p) - p.price) * 100) / 100)}</span>}
           </div>
           {p.coupon && <div className="coupon">קופון <b dir="ltr">{p.coupon}</b> מוריד עוד כמה שקלים בקופה</div>}
-          <p style={{ margin: 0 }}>{p.desc}</p>
-          <div className="pc">
+          {p.desc && <p style={{ margin: 0 }}>{p.desc}</p>}
+          {p.pros.length > 0 && <div className="pc">
             <div><b style={{ color: "var(--good)" }}>מה טוב</b><ul>{p.pros.map((x) => <li key={x}>{x}</li>)}</ul></div>
             <div><b style={{ color: "var(--price)" }}>שימו לב</b><ul>{p.cons.map((x) => <li key={x}>{x}</li>)}</ul></div>
-          </div>
+          </div>}
           <button className="btn btn-gold btn-lg" onClick={() => buy(p, from)}>לקנייה ב-AliExpress<Ic name="ExternalLink" size={18} /></button>
           <span className="disclose">חיפשנו והשווינו עבורכם: זה המחיר הכי משתלם שמצאנו למוצר, ישירות מ-AliExpress.</span>
         </div>
       </div>
-      {similar.length > 0 && <section className="section" style={{ marginTop: 0 }}><div className="section-head"><h2>עוד ב{cat.name}</h2></div><Grid items={similar} open={open} from={from} /></section>}
+      {similar.length > 0 && <section className="section" style={{ marginTop: 0 }}><div className="section-head"><h2>{cat ? `עוד ב${cat.name}` : "עוד מוצרים דומים"}</h2></div><Grid items={similar} open={open} from={from} /></section>}
     </div>
   );
 }
@@ -601,13 +596,34 @@ function Scan() {
 }
 
 /* ---------- gift finder ---------- */
+const GIFT_COUNT = 12;
+const ROMANTIC = new Set(["watch", "smartwatch", "necklace", "bracelet", "ring", "earrings", "perfume-bottle", "handbag", "wallet", "sunglasses", "massage-gun"]);
+// always within the budget; prefers gifts that suit the recipient and their interests, one per product type so the
+// ideas differ, and widens the search (interests, then recipient) until there are enough ideas
+function giftIdeas(products: Product[], who: string, likes: string[], budget: number, occ: string) {
+  const affordable = products.filter((p) => p.price <= budget && p.recipients.length > 0);
+  const score = (p: Product) => (likes.includes(p.cat) ? 4 : 0) + (occ === "יום נישואין" && p.type && ROMANTIC.has(p.type) ? 3 : 0)
+    + (p.price >= budget * 0.2 ? 2 : 0) + (p.store ? 1 : 0) + Math.log10(1 + p.orders) / 2;
+  const picked: Product[] = [];
+  const seen = new Set<string>();
+  for (const pool of [
+    affordable.filter((p) => p.recipients.includes(who) && (!likes.length || likes.includes(p.cat))),
+    affordable.filter((p) => p.recipients.includes(who)),
+    affordable,
+  ]) {
+    for (const p of [...pool].sort((a, b) => score(b) - score(a))) {
+      if (picked.length >= GIFT_COUNT) return picked;
+      const k = p.type || p.id;
+      if (!seen.has(k)) { seen.add(k); picked.push(p); }
+    }
+  }
+  return picked;
+}
+
 function GiftFinder({ open, products }: { open: (p: Product, f: string) => void; products: Product[] }) {
   const [step, setStep] = useState(0);
   const [who, setWho] = useState(""); const [likes, setLikes] = useState<string[]>([]); const [budget, setBudget] = useState(0); const [occ, setOcc] = useState("");
-  const results = useMemo(() => {
-    const r = products.filter((p) => p.price <= budget && (likes.length === 0 || likes.includes(p.cat)));
-    return r.sort((a, b) => (b.recipients.includes(who) ? 1 : 0) - (a.recipients.includes(who) ? 1 : 0) || saveStore(b) - saveStore(a)).slice(0, 5);
-  }, [products, budget, likes, who]);
+  const results = useMemo(() => giftIdeas(products, who, likes, budget, occ), [products, budget, likes, who, occ]);
   const qs = [
     { t: "למי המתנה?", body: <div className="options">{RECIPIENTS.map((r) => <button key={r.id} className="opt" aria-pressed={who === r.id} onClick={() => { setWho(r.id); setStep(1); }}>{r.label}</button>)}</div> },
     { t: "במה הוא או היא מתעניינים? (אפשר כמה)", body: <><div className="options">{INTERESTS.map((r) => <button key={r.id} className="opt" aria-pressed={likes.includes(r.id)} onClick={() => setLikes(likes.includes(r.id) ? likes.filter((x) => x !== r.id) : [...likes, r.id])}>{r.label}</button>)}</div><button className="btn btn-gold" style={{ justifySelf: "start" }} onClick={() => setStep(2)}>המשך</button></> },
@@ -616,7 +632,7 @@ function GiftFinder({ open, products }: { open: (p: Product, f: string) => void;
   ];
   return (
     <div style={{ display: "grid", gap: 20 }}>
-      <div className="page-title"><span className="eyebrow gold-ink">מוצא מתנות</span><h1>4 שאלות, ויש לכם מתנה</h1><p>עונים מהר, מקבלים 5 רעיונות בתקציב שבחרתם. אפשר לחזור אחורה בכל שלב.</p></div>
+      <div className="page-title"><span className="eyebrow gold-ink">מוצא מתנות</span><h1>4 שאלות, ויש לכם מתנה</h1><p>עונים מהר, מקבלים {GIFT_COUNT} רעיונות בתקציב שבחרתם, עם מחיר וקישור לקנייה. אפשר לחזור אחורה בכל שלב.</p></div>
       <div className="panel">
         <div className="steps" aria-hidden="true">{[0, 1, 2, 3].map((i) => <i key={i} className={i <= step ? "on" : ""} />)}</div>
         {step < 4 ? (
@@ -626,7 +642,7 @@ function GiftFinder({ open, products }: { open: (p: Product, f: string) => void;
           <>
             <div className="section-head"><h2 style={{ margin: 0, fontSize: 24 }}>{results.length} רעיונות ל{RECIPIENTS.find((r) => r.id === who)?.label}, עד {ils(budget)}, ל{occ}</h2>
               <button className="link" onClick={() => { setStep(0); setLikes([]); }}>להתחיל מחדש</button></div>
-            {results.length ? <Grid items={results} open={open} from="מוצא מתנות" /> : <p className="demo-note">אין התאמה במאגר הקטן של ההדגמה. בגרסה המלאה נשלים מ-AliExpress.</p>}
+            <Grid items={results} open={open} from="מוצא מתנות" />
           </>
         )}
       </div>
