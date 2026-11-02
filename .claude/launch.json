@@ -24,6 +24,30 @@
         "site"
       ],
       "port": 5179
+    },
+    {
+      "name": "mltest",
+      "runtimeExecutable": "py",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "5180",
+        "-d",
+        "C:/Users/User/AppData/Local/Temp/claude/C--Users-User-OneDrive--------------claude-AliEx/a1fe854b-1b15-4a8a-875e-b3cf118b1f83/scratchpad/ml/web"
+      ],
+      "port": 5180
+    },
+    {
+      "name": "dist",
+      "runtimeExecutable": "py",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "5182",
+        "-d",
+        "C:/Users/User/AppData/Local/Temp/claude/C--Users-User-OneDrive--------------claude-AliEx/a1fe854b-1b15-4a8a-875e-b3cf118b1f83/scratchpad/konim-proto/dist"
+      ],
+      "port": 5182
     }
   ]
 }

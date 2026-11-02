@@ -1,0 +1,4 @@
+*.onnx binary
+*.wasm binary
+*.bin binary
+*.webp binary

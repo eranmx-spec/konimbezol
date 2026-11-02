@@ -3,3 +3,11 @@ dist/
 .claude/settings.local.json
 *.log
 .env*
+# the recognizer binaries are built into site/scan; the prototype copy keeps only the small files
+prototype/public/scan/*.onnx
+prototype/public/scan/*.wasm
+prototype/public/scan/*.mjs
+prototype/public/scan/*.bin
+# intermediate Portals exports
+prototype/scan/portals-*.json
+prototype/scan/catalog-raw.scraped-backup.json

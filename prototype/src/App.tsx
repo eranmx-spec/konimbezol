@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as Icons from "lucide-react";
 import { BUDGETS, CATEGORIES, INTERESTS, MODULE_STATS, PRODUCTS, RECIPIENTS, img } from "./data";
 import type { CatId, Product } from "./data";
+import { allLabels, itemsFor, onProgress, recognize, warmup } from "./recognize";
+import type { Guess, ScanItem, ScanLabel } from "./recognize";
+import { productLink, searchLink } from "./links";
 
 type View =
   | { v: "home" } | { v: "cat"; id: CatId } | { v: "product"; id: string; from: string }
@@ -17,7 +20,7 @@ const byId = (id: string) => PRODUCTS.find((p) => p.id === id)!;
 // the admin demo stays out of the public build
 const PAGES = import.meta.env.DEV ? ["scan", "gift", "admin"] : ["scan", "gift"];
 const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("a11y-noanim");
-const aliUrl = (p: Product) => `https://he.aliexpress.com/item/${p.ali}.html`;
+const aliUrl = (p: Product) => productLink(p.ali);
 
 // consent-gated analytics: GoatCounter is cookieless and only loads after the visitor agrees
 const GOATCOUNTER = ""; // e.g. "konim-hacham" once the account exists
@@ -142,7 +145,7 @@ export default function App() {
             {view.v === "search" && <Search q={view.q} open={open} products={products} />}
             {view.v === "product" && <ProductPage p={products.find((p) => p.id === view.id)!} from={view.from} buy={buy} open={open} products={products} />}
             {view.v === "gift" && <GiftFinder open={open} products={products} />}
-            {view.v === "scan" && <Scan open={open} buy={buy} />}
+            {view.v === "scan" && <Scan />}
             {view.v === "admin" && <Admin products={products} setProducts={setProducts} setToast={setToast} />}
           </div>
         )}
@@ -396,71 +399,201 @@ function ProductPage({ p, from, buy, open, products }: { p: Product; from: strin
 }
 
 /* ---------- scan (photo → cheaper) ---------- */
-function Scan({ open, buy }: { open: (p: Product, f: string) => void; buy: (p: Product, f: string) => void }) {
-  const [pic, setPic] = useState(""); const [state, setState] = useState<"idle" | "busy" | "done" | "bad">("idle");
+// best value among the items that really sell (at least a third of the top seller's orders), otherwise the top seller
+const bestOf = (items: ScanItem[]) => {
+  if (!items.length) return null;
+  const top = Math.max(...items.map((x) => x.sold));
+  const proven = items.filter((x) => x.sold >= Math.max(3, top / 3));
+  return (proven.length ? proven : items).reduce((a, b) => (b.price < a.price ? b : a));
+};
+// our hand-picked products lead the results for their product type
+const CURATED: Record<string, string[]> = {
+  earbuds: ["p1"], charger: ["p2"], smartwatch: ["p3"], "power-bank": ["p4"], "dash-cam": ["p5"], "tire-inflator": ["p6"],
+  "car-phone-holder": ["p7"], "car-vacuum": ["p8"], drill: ["p9"], "laser-measure": ["p10"], "socket-set": ["p11"],
+  "food-containers": ["p12"], "spice-rack": ["p13"], "milk-frother": ["p14"], "sensor-light": ["p15"], headlamp: ["p16"],
+  cooler: ["p17"], hammock: ["p18"], thermos: ["p19"], drone: ["p20"],
+};
+const curatedFor = (id: string): ScanItem[] => (CURATED[id] || []).map(byId).map((p) => ({
+  ali: p.ali, title: p.title, price: p.price, off: Math.round((1 - p.price / p.orig) * 100), sold: p.orders, soldAll: p.orders, star: p.rating, img: p.img, link: productLink(p.ali),
+}));
+const soldText = (n: number) => (n >= 1000 ? `${Math.floor(n / 1000).toLocaleString("he-IL")} אלף+ הזמנות החודש` : n ? `${n.toLocaleString("he-IL")} הזמנות החודש` : "מוצר חדש");
+const metaText = (it: ScanItem) => (it.soldAll ? `${it.star} · ${it.soldAll.toLocaleString("he-IL")}+ הזמנות` : (it.star ? `${it.star} · ` : "") + soldText(it.sold));
+
+function ItemCard({ it, i }: { it: ScanItem; i: number }) {
+  return (
+    <a className="card rv in" style={{ "--d": `${(i % 4) * 70}ms` } as React.CSSProperties} href={it.link} target="_blank" rel="noopener noreferrer sponsored">
+      <div className="thumb"><img src={it.img} alt="" loading="lazy" referrerPolicy="no-referrer" />{it.off >= 10 && <span className="off num">-{it.off}%</span>}</div>
+      <div className="card-body">
+        <span className="card-title">{it.title}</span>
+        <span className="price-row num"><span className="price">{ils(it.price)}</span></span>
+        <span className="meta num"><Ic name={it.star ? "Star" : "TrendingUp"} size={13} />{metaText(it)}</span>
+      </div>
+    </a>
+  );
+}
+
+function Scan() {
+  const [pct, setPct] = useState(0);
+  const [phase, setPhase] = useState<"idle" | "busy" | "done" | "bad" | "error">("idle");
+  const [pic, setPic] = useState("");
+  const [guesses, setGuesses] = useState<Guess[]>([]);
+  const [chosen, setChosen] = useState<ScanLabel | null>(null);
+  const [items, setItems] = useState<ScanItem[]>([]);
   const [store, setStore] = useState("");
-  const run = (src: string) => { setPic(src); setState("busy"); setTimeout(() => setState("done"), 2200); };
+  const [labels, setLabels] = useState<ScanLabel[]>([]);
+  const [typed, setTyped] = useState("");
+  const [typedMiss, setTypedMiss] = useState(false);
+
+  // start downloading the recognizer as soon as the page opens, so it is ready by the time the photo is taken
+  useEffect(() => {
+    const off = onProgress(setPct);
+    warmup().then(allLabels).then(setLabels).catch(() => setPct(-1));
+    return off;
+  }, []);
+  useEffect(() => () => { if (pic.startsWith("blob:")) URL.revokeObjectURL(pic); }, [pic]);
+
+  const choose = async (l: ScanLabel) => {
+    setChosen(l); setStore(""); setTypedMiss(false);
+    const own = curatedFor(l.id);
+    setItems([...own, ...(await itemsFor(l.id)).filter((x) => !own.some((o) => o.ali === x.ali))]);
+    setPhase("done");
+  };
+  const run = async (src: Blob | HTMLImageElement, url: string) => {
+    setPic(url); setPhase("busy"); setChosen(null); setItems([]); setGuesses([]);
+    try {
+      const g = await recognize(src);
+      setGuesses(g);
+      const top = g.find((x) => x.label.cat !== "neg");
+      if (!top || g[0].label.cat === "neg" || top.p < 0.15) setPhase("done");
+      else await choose(top.label);
+    } catch { setPhase("error"); }
+  };
   const onFile = (f?: File) => {
     if (!f) return;
-    if (!/^image\/(jpeg|png|webp|heic)$/.test(f.type) || f.size > 8 * 1024 * 1024) { setPic(""); setState("bad"); return; }
-    const r = new FileReader(); r.onload = () => run(String(r.result)); r.readAsDataURL(f);
+    if (!/^image\//.test(f.type) || f.size > 15 * 1024 * 1024) { setPic(""); setPhase("bad"); return; }
+    run(f, URL.createObjectURL(f));
   };
-  const best = byId("p5");
-  const others = ["p7", "p6", "p8"].map(byId);
-  const storeN = +store || 899;
+  const sample = async () => {
+    const im = new Image();
+    im.src = byId("p5").img;
+    await im.decode();
+    run(im, im.src);
+  };
+  const reset = () => { setPhase("idle"); setPic(""); setStore(""); setChosen(null); setItems([]); setGuesses([]); setTyped(""); };
+  const findTyped = (e: React.FormEvent) => {
+    e.preventDefault();
+    const t = typed.trim();
+    if (!t) return;
+    const hit = labels.find((l) => l.he === t) || labels.find((l) => l.he.includes(t) || t.includes(l.he)) || labels.find((l) => l.q.includes(t.toLowerCase()));
+    if (hit) { if (phase === "idle" || phase === "bad") setPic(""); choose(hit); } else setTypedMiss(true);
+  };
+
+  const others = guesses.filter((g) => g.label.cat !== "neg" && g.label.id !== chosen?.id && g.p >= 0.03).slice(0, 3);
+  const unsure = guesses.filter((g) => g.label.cat !== "neg").slice(0, 4);
+  const best = bestOf(items);
+  const rest = items.filter((x) => x !== best);
+  const storeN = +store;
+  const engine = pct < 0 ? "" : pct >= 100 ? "מנוע הזיהוי מוכן" : `מכינים את מנוע הזיהוי… ${pct}%`;
+
+  const typedForm = (
+    <form className="typed" onSubmit={findTyped}>
+      <label htmlFor="typed" className="sr-only">מה צילמתם?</label>
+      <input id="typed" list="scan-types" value={typed} placeholder="או כתבו מה צילמתם: עכבר, רמקול, שמלה..." onChange={(e) => { setTyped(e.target.value); setTypedMiss(false); }} />
+      <datalist id="scan-types">{labels.map((l) => <option key={l.id} value={l.he} />)}</datalist>
+      <button className="btn btn-line" type="submit">חיפוש</button>
+      {typedMiss && <p role="alert" className="disclose" style={{ margin: 0, width: "100%" }}>לא מצאנו את זה ברשימה. נסו מילה אחרת, למשל "אוזניות" או "מברגה".</p>}
+    </form>
+  );
+
   return (
     <div style={{ display: "grid", gap: 20 }}>
-      <div className="page-title"><span className="eyebrow gold-ink">צלם ומצא</span><h1>ראיתם בחנות? צלמו, ונמצא לכם בזול.</h1><p>מצלמים את המוצר או את המדבקה שלו, ותוך שניות מקבלים את אותו מוצר ב-AliExpress עם המחיר הכי טוב.</p></div>
-      <p className="beta" role="note"><b>גרסת הרצה:</b> הזיהוי האוטומטי של המוצר עדיין בפיתוח. כרגע מוצגת תוצאה לדוגמה, כדי שתראו איך זה יעבוד.</p>
+      <div className="page-title"><span className="eyebrow gold-ink">צלם ומצא</span><h1>ראיתם בחנות? צלמו, ונמצא לכם בזול.</h1><p>מצלמים את המוצר, המערכת מזהה מה זה, ומיד מקבלים את אותו מוצר ב-AliExpress עם המחיר הכי משתלם שמצאנו.</p></div>
       <div className="panel scan-panel">
-        {state === "idle" || state === "bad" ? (
+        {phase === "idle" || phase === "bad" ? (
           <div className="drop">
             <span className="drop-ring"><Ic name="Camera" size={40} /></span>
             <div className="drop-btns">
-              <input id="cam" type="file" accept="image/*" capture="environment" className="sr-only" aria-describedby="scan-privacy" onChange={(e) => onFile(e.target.files?.[0])} />
+              <input id="cam" type="file" accept="image/*" capture="environment" className="sr-only" aria-describedby="scan-privacy" onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ""; }} />
               <label className="btn btn-gold btn-lg" htmlFor="cam"><Ic name="Camera" size={20} />צילום עכשיו</label>
-              <input id="file" type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" aria-describedby="scan-privacy" onChange={(e) => onFile(e.target.files?.[0])} />
+              <input id="file" type="file" accept="image/*" className="sr-only" aria-describedby="scan-privacy" onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ""; }} />
               <label className="btn btn-line" htmlFor="file"><Ic name="Upload" size={18} />מהגלריה</label>
             </div>
-            <button className="link" onClick={() => run(best.img)}>או נסו עם תמונה לדוגמה (מצלמת דרך בחנות)</button>
-            <span className="disclose" id="scan-privacy">JPG, PNG או WEBP עד 8MB. בגרסה הזו התמונה נשארת במכשיר שלכם ולא נשלחת אלינו. <a href="privacy.html">מדיניות פרטיות</a></span>
-            {state === "bad" && <p role="alert" style={{ color: "var(--price)", margin: 0 }}>אפשר להעלות רק תמונה עד 8MB. נסו תמונה אחרת.</p>}
+            <button className="link" onClick={sample}>או נסו עם תמונה לדוגמה (מצלמת דרך)</button>
+            {engine && <span className="engine num" role="status"><i style={{ "--p": `${Math.max(pct, 0)}%` } as React.CSSProperties} />{engine}</span>}
+            {typedForm}
+            <span className="disclose" id="scan-privacy">הזיהוי נעשה בתוך המכשיר שלכם, והתמונה לא נשלחת לשום מקום. בכניסה הראשונה נטען מנוע זיהוי של כ-27MB, ואחר כך הוא שמור במכשיר. <a href="privacy.html">מדיניות פרטיות</a></span>
+            {phase === "bad" && <p role="alert" style={{ color: "var(--price)", margin: 0 }}>אפשר להעלות רק קובץ תמונה עד 15MB. נסו תמונה אחרת.</p>}
           </div>
         ) : (
-          <div className="scan-result">
-            <div className={`scan-shot ${state === "busy" ? "busy" : ""}`}>
-              <img src={pic} alt="התמונה שצילמתם" />
-              {state === "busy" && <><span className="scanline" aria-hidden="true" /><span className="corner c1" /><span className="corner c2" /><span className="corner c3" /><span className="corner c4" /></>}
-            </div>
-            {state === "busy" && <p className="meta scan-status" role="status"><Ic name="Sparkles" size={18} />מזהים את המוצר ומשווים מחירים אצל מאות מוכרים...</p>}
-            {state === "done" && (
-              <div className="found rv in" role="status">
-                <span className="chip chip-good">זיהינו: מצלמת דרך 4K עם 3 ערוצים</span>
-                <h2>{best.title}</h2>
-                <div className="field" style={{ maxWidth: 260 }}>
-                  <label htmlFor="sp">כמה זה עלה בחנות? (לא חובה)</label>
-                  <input id="sp" inputMode="numeric" value={store} placeholder="899" onChange={(e) => setStore(e.target.value.replace(/\D/g, ""))} />
-                </div>
-                <div className="vs num">
-                  <div><small>בחנות</small><s>{ils(storeN)}</s></div>
-                  <Ic name="ArrowLeft" size={20} />
-                  <div className="vs-ali"><small>ב-AliExpress, משלוח עד הבית</small><b>{ils(best.price)}</b></div>
-                </div>
-                {storeN > best.price && <div className="save-big num">חוסכים {ils(storeN - best.price)}<small>{Math.round((1 - best.price / storeN) * 100)}% פחות מהחנות</small></div>}
-                <div className="hero-cta">
-                  <button className="btn btn-gold btn-lg" onClick={() => buy(best, "צלם ומצא")}>לקנייה במחיר הזה<Ic name="ExternalLink" size={18} /></button>
-                  <button className="btn btn-line" onClick={() => { setState("idle"); setPic(""); setStore(""); }}>לצלם מוצר אחר</button>
-                </div>
+          <div className={pic ? "scan-result" : "found"}>
+            {pic && (
+              <div className={`scan-shot ${phase === "busy" ? "busy" : ""}`}>
+                <img src={pic} alt="התמונה שצילמתם" />
+                {phase === "busy" && <><span className="scanline" aria-hidden="true" /><span className="corner c1" /><span className="corner c2" /><span className="corner c3" /><span className="corner c4" /></>}
+              </div>
+            )}
+            {phase === "busy" && <p className="meta scan-status" role="status"><Ic name="Sparkles" size={18} />{pct < 100 ? `טוענים את מנוע הזיהוי (${Math.max(pct, 0)}%)...` : "מזהים את המוצר ומחפשים את המחיר הכי משתלם..."}</p>}
+            {phase === "error" && (
+              <div className="found" role="status">
+                <h2>לא הצלחנו להפעיל את הזיהוי בדפדפן הזה</h2>
+                <p style={{ margin: 0 }}>אפשר לכתוב מה צילמתם, ונמצא לכם את המחיר.</p>
+                {typedForm}
+                <button className="btn btn-line" onClick={reset}>חזרה</button>
+              </div>
+            )}
+            {phase === "done" && !chosen && (
+              <div className="found" role="status">
+                <h2>לא בטוחים מה צילמתם</h2>
+                <p style={{ margin: 0 }}>{unsure.length ? "זה אחד מאלה?" : "נסו לצלם מקרוב, כשהמוצר ממלא את רוב התמונה."}</p>
+                {unsure.length > 0 && <div className="alts">{unsure.map((g) => <button key={g.label.id} className="chip chip-btn" onClick={() => choose(g.label)}>{g.label.he}</button>)}</div>}
+                {typedForm}
+                <button className="btn btn-line" onClick={reset}>לצלם שוב</button>
+              </div>
+            )}
+            {phase === "done" && chosen && (
+              <div className="found" role="status">
+                <span className="chip chip-good">זיהינו: {chosen.he}</span>
+                {others.length > 0 && <div className="alts"><span>לא זה? אולי:</span>{others.map((g) => <button key={g.label.id} className="chip chip-btn" onClick={() => choose(g.label)}>{g.label.he}</button>)}</div>}
+                {best ? (
+                  <>
+                    <a className="scan-best" href={best.link} target="_blank" rel="noopener noreferrer sponsored">
+                      <img src={best.img} alt="" referrerPolicy="no-referrer" />
+                      <span>{best.title}<small className="meta num"><Ic name={best.star ? "Star" : "TrendingUp"} size={13} />{metaText(best)}</small></span>
+                    </a>
+                    <div className="field" style={{ maxWidth: 280 }}>
+                      <label htmlFor="sp">כמה זה עלה בחנות? נחשב כמה חוסכים</label>
+                      <input id="sp" inputMode="numeric" value={store} placeholder="מחיר בחנות בשקלים" onChange={(e) => setStore(e.target.value.replace(/\D/g, ""))} />
+                    </div>
+                    <div className="vs num">
+                      {storeN > 0 && <><div><small>בחנות</small><s>{ils(storeN)}</s></div><Ic name="ArrowLeft" size={20} /></>}
+                      <div className="vs-ali"><small>ב-AliExpress, משלוח עד הבית</small><b>{ils(best.price)}</b></div>
+                    </div>
+                    {storeN > best.price && <div className="save-big num">חוסכים {ils(Math.round(storeN - best.price))}<small>{Math.round((1 - best.price / storeN) * 100)}% פחות מהחנות</small></div>}
+                    <div className="hero-cta">
+                      <a className="btn btn-gold btn-lg" href={best.link} target="_blank" rel="noopener noreferrer sponsored">לקנייה במחיר הזה<Ic name="ExternalLink" size={18} /></a>
+                      <button className="btn btn-line" onClick={reset}>לצלם מוצר אחר</button>
+                    </div>
+                    <span className="disclose">חיפשנו והשווינו עבורכם: זה המחיר הכי משתלם שמצאנו ל{chosen.he}, ישירות מ-AliExpress.</span>
+                    <a className="link" href={searchLink(chosen.q)} target="_blank" rel="noopener noreferrer sponsored">עוד דגמים של {chosen.he} ב-AliExpress<Ic name="ArrowUpLeft" size={16} /></a>
+                  </>
+                ) : (
+                  <>
+                    <p style={{ margin: 0 }}>ריכזנו לכם את ה{chosen.he} הנמכרים ביותר ב-AliExpress, מסודרים לפי כמות הזמנות.</p>
+                    <div className="hero-cta">
+                      <a className="btn btn-gold btn-lg" href={searchLink(chosen.q)} target="_blank" rel="noopener noreferrer sponsored">למחירים ב-AliExpress<Ic name="ExternalLink" size={18} /></a>
+                      <button className="btn btn-line" onClick={reset}>לצלם מוצר אחר</button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>
         )}
       </div>
-      {state === "done" && (
+      {phase === "done" && chosen && rest.length > 0 && (
         <section className="section" style={{ marginTop: 0 }}>
-          <div className="section-head"><h2>עוד דברים שכדאי לקנות באלי ולא בחנות</h2></div>
-          <Grid items={others} open={open} from="צלם ומצא" />
-          <p className="demo-note">הדגמה: תמיד מזוהה אותו מוצר. בגרסה המלאה הזיהוי נעשה עם AI והחיפוש ב-AliExpress.</p>
+          <div className="section-head"><h2>עוד אפשרויות ל{chosen.he}</h2></div>
+          <div className="grid">{rest.map((it, i) => <ItemCard key={it.ali} it={it} i={i} />)}</div>
         </section>
       )}
     </div>
