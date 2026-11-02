@@ -24,21 +24,6 @@ const PAGES = import.meta.env.DEV ? ["scan", "gift", "admin"] : ["scan", "gift"]
 const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("a11y-noanim");
 const aliUrl = (p: Product) => productLink(p.ali);
 
-// consent-gated analytics: GoatCounter is cookieless and only loads after the visitor agrees
-const GOATCOUNTER = ""; // e.g. "konim-hacham" once the account exists
-const CONSENT_KEY = "konim-consent-v1";
-type Consent = { analytics: boolean; at: string };
-function readConsent(): Consent | null {
-  try { return JSON.parse(localStorage.getItem(CONSENT_KEY) || "null"); } catch { return null; }
-}
-function loadAnalytics() {
-  if (!GOATCOUNTER || document.getElementById("gc-script")) return;
-  const s = document.createElement("script");
-  s.id = "gc-script"; s.async = true; s.src = "https://gc.zgo.at/count.js";
-  s.dataset.goatcounter = `https://${GOATCOUNTER}.goatcounter.com/count`;
-  document.body.appendChild(s);
-}
-
 function fromHash(): View {
   const h = location.hash.replace("#", "");
   if (PAGES.includes(h)) return { v: h } as View;
@@ -105,13 +90,6 @@ export default function App() {
   };
   const open = (p: Product, from: string) => go({ v: "product", id: p.id, from });
   const buy = (p: Product, _from: string) => { window.open(aliUrl(p), "_blank", "noopener,noreferrer"); };
-  const [consentOpen, setConsentOpen] = useState(() => readConsent() === null);
-  useEffect(() => { if (readConsent()?.analytics) loadAnalytics(); }, []);
-  const decide = (analytics: boolean) => {
-    try { localStorage.setItem(CONSENT_KEY, JSON.stringify({ analytics, at: new Date().toISOString() })); } catch { /* storage blocked */ }
-    if (analytics) loadAnalytics();
-    setConsentOpen(false);
-  };
   useEffect(() => { document.documentElement.lang = "he"; document.documentElement.dir = "rtl"; }, []);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(""), 3800); return () => clearTimeout(t); }, [toast]);
 
@@ -174,22 +152,12 @@ export default function App() {
             <a href="terms.html">תקנון ותנאי שימוש</a>
             <a href="cookies.html">מדיניות עוגיות</a>
             <a href="returns.html">החזרות והחזר כספי</a>
-            <button onClick={() => setConsentOpen(true)}>הגדרות עוגיות</button>
             {import.meta.env.DEV && <button onClick={() => go({ v: "admin" })}>ממשק ניהול (לערן)</button>}
           </div>
         </div>
         <div className="wrap copy">© {new Date().getFullYear()} קונים חכם. תמונות המוצרים מ-AliExpress, כל הזכויות שמורות לבעליהן.</div>
       </footer>
 
-      {consentOpen && (
-        <div className="consent" role="region" aria-label="הסכמה לעוגיות">
-          <p>אנחנו רוצים למדוד בעילום שם כמה אנשים משתמשים באתר, כדי לשפר אותו. זה קורה רק אם תאשרו. <a href="cookies.html">מדיניות עוגיות</a></p>
-          <div className="consent-btns">
-            <button className="btn btn-gold" onClick={() => decide(true)}>מאשר מדידה</button>
-            <button className="btn btn-line" onClick={() => decide(false)}>רק הכרחי</button>
-          </div>
-        </div>
-      )}
       {toast && <div className="toast" role="status">{toast}</div>}
     </>
   );
